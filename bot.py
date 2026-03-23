@@ -117,8 +117,12 @@ CHANNEL_LABELS = {
 
 def load_tracker() -> set:
     if os.path.exists(TRACKER_FILE):
-        with open(TRACKER_FILE, "r") as f:
-            return set(json.load(f).get("posted", []))
+        try:
+            with open(TRACKER_FILE, "r") as f:
+                return set(json.load(f).get("posted", []))
+        except (json.JSONDecodeError, ValueError):
+            # File is empty or corrupted — start fresh
+            return set()
     return set()
 
 
