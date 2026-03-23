@@ -40,7 +40,7 @@ TRACKER_FILE        = "posted_internships.json"
 SOURCES = [
     {
         "label": "Summer 2026 Internships",
-        "url":   "https://raw.githubusercontent.com/SimplifyJobs/Summer2026-Internships/dev/README.md",
+        "url":   "https://raw.githubusercontent.com/SimplifyJobs/Summer2026-Internships/main/README.md",
     },
     # Uncomment to also monitor new-grad positions:
     # {
