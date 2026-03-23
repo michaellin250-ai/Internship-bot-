@@ -13,6 +13,7 @@ Setup:
 import asyncio
 import json
 import os
+import re
 import hashlib
 from datetime import datetime, timezone
 
@@ -74,28 +75,31 @@ def make_id(company: str, role: str, apply_url: str) -> str:
 
 def parse_readme(content: str) -> list[dict]:
     """
-    Parse the SimplifyJobs HTML-table README and return internship listings
-    for Software Engineering, Product Management, and Data Science / AI sections.
+    Parse the SimplifyJobs README (mixed markdown headings + HTML tables)
+    and return internship listings for Software Engineering, Product Management,
+    and Data Science / AI sections.
     """
-    soup = BeautifulSoup(content, "html.parser")
     listings = []
 
-    for h2 in soup.find_all("h2"):
-        section_text = h2.get_text(strip=True)
+    # The README uses markdown '## Heading' (not HTML <h2>), so split on those
+    sections = re.split(r"^## ", content, flags=re.MULTILINE)
+
+    for section in sections:
+        first_line = section.split("\n")[0].strip()
 
         # Match to one of our target sections
         matched_key = None
         for key in TARGET_SECTIONS:
-            if key in section_text:
+            if key in first_line:
                 matched_key = key
                 break
         if not matched_key:
             continue
 
-        emoji, category_label, _ = TARGET_SECTIONS[matched_key]
+        emoji, category_label, color = TARGET_SECTIONS[matched_key]
 
-        # Find the <table> that immediately follows this heading
-        table = h2.find_next("table")
+        soup  = BeautifulSoup(section, "html.parser")
+        table = soup.find("table")
         if not table:
             continue
 
@@ -111,16 +115,14 @@ def parse_readme(content: str) -> list[dict]:
 
             # ── Role ─────────────────────────────────────────────
             role = cells[1].get_text(strip=True)
-            # Skip closed listings and continuation rows
             if "🔒" in role or not role or role.startswith("↳"):
                 continue
-            role = role.replace("🔒", "").strip()
+            role = role.replace("🔒", "").replace("🎓", "").strip()
 
             # ── Location ─────────────────────────────────────────
             location = cells[2].get_text(separator=", ", strip=True) or "Not specified"
 
-            # ── Apply URL ─────────────────────────────────────────
-            # Prefer the "Apply" image link (direct employer link)
+            # ── Apply URL ────────────────────────────────────────
             apply_img = cells[3].find("img", alt="Apply")
             if apply_img and apply_img.parent and apply_img.parent.get("href"):
                 apply_url = apply_img.parent["href"]
@@ -134,15 +136,15 @@ def parse_readme(content: str) -> list[dict]:
             date_posted = cells[4].get_text(strip=True) if len(cells) > 4 else "—"
 
             listings.append({
-                "id":            make_id(company_name, role, apply_url),
-                "company":       company_name,
-                "company_url":   company_url,
-                "role":          role,
-                "location":      location,
-                "apply_url":     apply_url,
-                "date_posted":   date_posted,
-                "category":      f"{emoji} {category_label}",
-                "color":         TARGET_SECTIONS[matched_key][2],
+                "id":          make_id(company_name, role, apply_url),
+                "company":     company_name,
+                "company_url": company_url,
+                "role":        role,
+                "location":    location,
+                "apply_url":   apply_url,
+                "date_posted": date_posted,
+                "category":    f"{emoji} {category_label}",
+                "color":       color,
             })
 
     return listings
