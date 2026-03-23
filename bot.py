@@ -40,7 +40,7 @@ TRACKER_FILE        = "posted_internships.json"
 SOURCES = [
     {
         "label": "Summer 2026 Internships",
-        "url":   "https://raw.githubusercontent.com/SimplifyJobs/Summer2026-Internships/main/README.md",
+        "url":   "https://raw.githubusercontent.com/SimplifyJobs/Summer2026-Internships/dev/README.md",
     },
     # Uncomment to also monitor new-grad positions:
     # {
@@ -119,8 +119,8 @@ _LINK_TEXT_RE  = re.compile(r"\[([^\]]*)\]\([^)]*\)")
 _LINK_URL_RE   = re.compile(r"\[(?:[^\]]*)\]\(([^)]+)\)")
 # HTML tags (SimplifyJobs uses <br> for multi-location)
 _HTML_TAG_RE   = re.compile(r"<[^>]+>")
-# Separator rows: | :---: | --- |
-_SEPARATOR_RE  = re.compile(r"^\|[\s\-:|]+\|[\s\-:|]*$")
+# Separator rows: | :---: | --- |  (just needs to start with | and contain only separator chars)
+_SEPARATOR_RE  = re.compile(r"^\|[\s\-:|]+")
 
 
 def _clean(text: str) -> str:
