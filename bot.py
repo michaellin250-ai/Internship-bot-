@@ -2,7 +2,14 @@
 Discord Internship Bot
 ======================
 Monitors SimplifyJobs/Summer2026-Internships and posts new CS / PM / AI listings
-to a Discord channel.
+to location-specific Discord channels.
+
+Channels:
+  CHANNEL_REMOTE      → remote internships
+  CHANNEL_CALIFORNIA  → CA internships (SF, LA, San Jose, etc.)
+  CHANNEL_WASHINGTON  → WA internships (Seattle, Redmond, etc.)
+  CHANNEL_NEW_YORK    → NY internships (NYC, etc.)
+  CHANNEL_GENERAL     → everything else
 
 Setup:
   1. pip install -r requirements.txt
@@ -30,9 +37,15 @@ from dotenv import load_dotenv
 load_dotenv()
 
 TOKEN               = os.getenv("DISCORD_TOKEN")
-CHANNEL_ID          = int(os.getenv("CHANNEL_ID", "0"))
 CHECK_INTERVAL_MINS = int(os.getenv("CHECK_INTERVAL_MINUTES", "20"))
 TRACKER_FILE        = "posted_internships.json"
+
+# Location channel IDs — set these in Railway Variables (or .env)
+CHANNEL_REMOTE     = int(os.getenv("CHANNEL_REMOTE",     "0"))
+CHANNEL_CALIFORNIA = int(os.getenv("CHANNEL_CALIFORNIA", "0"))
+CHANNEL_WASHINGTON = int(os.getenv("CHANNEL_WASHINGTON", "0"))
+CHANNEL_NEW_YORK   = int(os.getenv("CHANNEL_NEW_YORK",   "0"))
+CHANNEL_GENERAL    = int(os.getenv("CHANNEL_GENERAL",    "0"))
 
 SOURCES = [
     {
@@ -43,9 +56,59 @@ SOURCES = [
 
 # Sections to scrape from the README
 TARGET_SECTIONS = {
-    "Software Engineering": ("💻", "Software / CS",        discord.Color.blurple()),
-    "Product Management":   ("📋", "Product Management",   discord.Color.purple()),
-    "Data Science":         ("🤖", "Data Science / AI",    discord.Color.green()),
+    "Software Engineering": ("💻", "Software / CS",      discord.Color.blurple()),
+    "Product Management":   ("📋", "Product Management", discord.Color.purple()),
+    "Data Science":         ("🤖", "Data Science / AI",  discord.Color.green()),
+}
+
+# ---------------------------------------------------------------------------
+# Location routing
+# ---------------------------------------------------------------------------
+
+# Keywords for each location channel (checked against lowercased location string)
+LOCATION_KEYWORDS = {
+    "remote":     ["remote", "anywhere", "work from home", "wfh"],
+    "california": ["california", " ca,", " ca ", ", ca", "san francisco", "sf,", " sf ",
+                   "los angeles", " la,", " la ", "san jose", "san diego", "santa clara",
+                   "palo alto", "menlo park", "mountain view", "sunnyvale", "irvine",
+                   "berkeley", "oakland", "sacramento", "san mateo", "redwood city"],
+    "washington": ["washington", " wa,", " wa ", ", wa", "seattle", "redmond", "bellevue",
+                   "kirkland", "tacoma", "spokane", "bothell"],
+    "new_york":   ["new york", " ny,", " ny ", ", ny", "nyc", "brooklyn", "manhattan",
+                   "queens", "bronx", "albany", "buffalo"],
+}
+
+
+def get_location_channel(location: str) -> str:
+    """Return the channel key ('remote', 'california', etc.) for a location string."""
+    loc = location.lower()
+
+    # Check remote first — a listing can say "Remote, CA" and we still want remote
+    if any(kw in loc for kw in LOCATION_KEYWORDS["remote"]):
+        return "remote"
+    if any(kw in loc for kw in LOCATION_KEYWORDS["california"]):
+        return "california"
+    if any(kw in loc for kw in LOCATION_KEYWORDS["washington"]):
+        return "washington"
+    if any(kw in loc for kw in LOCATION_KEYWORDS["new_york"]):
+        return "new_york"
+    return "general"
+
+
+CHANNEL_MAP = {
+    "remote":     lambda: CHANNEL_REMOTE,
+    "california": lambda: CHANNEL_CALIFORNIA,
+    "washington": lambda: CHANNEL_WASHINGTON,
+    "new_york":   lambda: CHANNEL_NEW_YORK,
+    "general":    lambda: CHANNEL_GENERAL,
+}
+
+CHANNEL_LABELS = {
+    "remote":     "🌐 Remote",
+    "california": "🌴 California",
+    "washington": "🌲 Washington",
+    "new_york":   "🗽 New York",
+    "general":    "🌍 Other",
 }
 
 # ---------------------------------------------------------------------------
@@ -81,13 +144,12 @@ def parse_readme(content: str) -> list[dict]:
     """
     listings = []
 
-    # The README uses markdown '## Heading' (not HTML <h2>), so split on those
+    # README uses markdown '## Heading' (not HTML <h2>), so split on those
     sections = re.split(r"^## ", content, flags=re.MULTILINE)
 
     for section in sections:
         first_line = section.split("\n")[0].strip()
 
-        # Match to one of our target sections
         matched_key = None
         for key in TARGET_SECTIONS:
             if key in first_line:
@@ -154,7 +216,7 @@ def parse_readme(content: str) -> list[dict]:
 # Discord embed builder
 # ---------------------------------------------------------------------------
 
-def build_embed(listing: dict, source_label: str) -> discord.Embed:
+def build_embed(listing: dict, source_label: str, location_label: str) -> discord.Embed:
     embed = discord.Embed(
         title=f"{listing['company']}  —  {listing['role']}"[:256],
         url=listing["apply_url"],
@@ -176,7 +238,7 @@ def build_embed(listing: dict, source_label: str) -> discord.Embed:
     else:
         embed.set_author(name=listing["company"])
 
-    embed.set_footer(text=f"Source: {source_label}")
+    embed.set_footer(text=f"{location_label}  •  {source_label}")
     return embed
 
 
@@ -191,15 +253,30 @@ client  = discord.Client(intents=intents)
 @client.event
 async def on_ready():
     print(f"✅  Logged in as {client.user}")
-    print(f"📡  Checking every {CHECK_INTERVAL_MINS} minute(s) — channel ID {CHANNEL_ID}")
+    print(f"📡  Checking every {CHECK_INTERVAL_MINS} minute(s)")
+    print(f"    Remote     → {CHANNEL_REMOTE}")
+    print(f"    California → {CHANNEL_CALIFORNIA}")
+    print(f"    Washington → {CHANNEL_WASHINGTON}")
+    print(f"    New York   → {CHANNEL_NEW_YORK}")
+    print(f"    General    → {CHANNEL_GENERAL}")
     check_and_post.start()
 
 
 @tasks.loop(minutes=CHECK_INTERVAL_MINS)
 async def check_and_post():
-    channel = client.get_channel(CHANNEL_ID)
-    if channel is None:
-        print(f"❌  Channel {CHANNEL_ID} not found. Check your CHANNEL_ID in Railway variables.")
+    # Build channel lookup — skip any that are set to 0 (not configured)
+    channels = {}
+    for key, id_fn in CHANNEL_MAP.items():
+        ch_id = id_fn()
+        if ch_id != 0:
+            ch = client.get_channel(ch_id)
+            if ch:
+                channels[key] = ch
+            else:
+                print(f"⚠️   Could not find channel for '{key}' (ID {ch_id})")
+
+    if not channels:
+        print("❌  No valid channels configured. Check your Railway variables.")
         return
 
     posted_ids = load_tracker()
@@ -219,12 +296,20 @@ async def check_and_post():
         print(f"    {len(listings)} relevant listings found, {len(new_listings)} new.")
 
         for listing in new_listings:
+            loc_key   = get_location_channel(listing["location"])
+            channel   = channels.get(loc_key) or channels.get("general")
+
+            if not channel:
+                continue  # no matching or general channel configured
+
+            loc_label = CHANNEL_LABELS.get(loc_key, "🌍 Other")
+
             try:
-                embed = build_embed(listing, source["label"])
+                embed = build_embed(listing, source["label"], loc_label)
                 await channel.send(embed=embed)
                 posted_ids.add(listing["id"])
                 new_total += 1
-                await asyncio.sleep(1.2)   # stay within Discord rate limits
+                await asyncio.sleep(1.2)
             except discord.HTTPException as exc:
                 print(f"⚠️   Discord error posting {listing['company']}: {exc}")
 
@@ -248,7 +333,4 @@ async def before_loop():
 if __name__ == "__main__":
     if not TOKEN:
         raise SystemExit("❌  DISCORD_TOKEN is not set.")
-    if CHANNEL_ID == 0:
-        raise SystemExit("❌  CHANNEL_ID is not set.")
-
     client.run(TOKEN)
