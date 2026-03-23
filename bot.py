@@ -1,11 +1,8 @@
 """
 Discord Internship Bot
 ======================
-Monitors GitHub internship repos and posts new CS / PM listings to a Discord channel.
-
-Sources:
-  - SimplifyJobs/Summer2026-Internships  (primary)
-  - SimplifyJobs/New-Grad-Positions      (optional, disabled by default)
+Monitors SimplifyJobs/Summer2026-Internships and posts new CS / PM / AI listings
+to a Discord channel.
 
 Setup:
   1. pip install -r requirements.txt
@@ -16,13 +13,13 @@ Setup:
 import asyncio
 import json
 import os
-import re
 import hashlib
 from datetime import datetime, timezone
 
 import discord
 from discord.ext import tasks
 import requests
+from bs4 import BeautifulSoup
 from dotenv import load_dotenv
 
 # ---------------------------------------------------------------------------
@@ -36,65 +33,28 @@ CHANNEL_ID          = int(os.getenv("CHANNEL_ID", "0"))
 CHECK_INTERVAL_MINS = int(os.getenv("CHECK_INTERVAL_MINUTES", "20"))
 TRACKER_FILE        = "posted_internships.json"
 
-# GitHub raw README URLs to monitor
 SOURCES = [
     {
         "label": "Summer 2026 Internships",
         "url":   "https://raw.githubusercontent.com/SimplifyJobs/Summer2026-Internships/dev/README.md",
     },
-    # Uncomment to also monitor new-grad positions:
-    # {
-    #     "label": "New Grad 2026",
-    #     "url":   "https://raw.githubusercontent.com/SimplifyJobs/New-Grad-Positions/dev/README.md",
-    # },
 ]
 
-# ---------------------------------------------------------------------------
-# Role-filter keywords
-# ---------------------------------------------------------------------------
-
-CS_KEYWORDS = [
-    "software", "engineer", "developer", "swe", "backend", "front-end",
-    "frontend", "full stack", "fullstack", "full-stack", "data", "machine learning",
-    "deep learning", "ml", "ai ", "artificial intelligence", "computer science",
-    " cs ", "devops", "cloud", "security", "cybersecurity", "embedded", "systems",
-    "mobile", "ios", "android", "web", "api", "infrastructure", "platform",
-    "site reliability", "sre", "qa ", "quality assurance", "test", "automation",
-    "network", "database", "firmware", "robotics", "computer vision",
-]
-
-PM_KEYWORDS = [
-    "product manager", "product management", "product intern",
-    "pm intern", "associate pm", "apm", "technical product",
-    "associate product manager",
-]
-
-ALL_KEYWORDS = CS_KEYWORDS + PM_KEYWORDS
-
-
-def is_relevant(role: str) -> bool:
-    """Return True if the role matches CS or PM keywords."""
-    role_lower = f" {role.lower()} "
-    return any(kw in role_lower for kw in ALL_KEYWORDS)
-
-
-def role_category(role: str):
-    """Return (emoji, label) tuple for the role category."""
-    role_lower = role.lower()
-    if any(kw in role_lower for kw in PM_KEYWORDS):
-        return "📋", "Product Management"
-    return "💻", "Software / CS"
-
+# Sections to scrape from the README
+TARGET_SECTIONS = {
+    "Software Engineering": ("💻", "Software / CS",        discord.Color.blurple()),
+    "Product Management":   ("📋", "Product Management",   discord.Color.purple()),
+    "Data Science":         ("🤖", "Data Science / AI",    discord.Color.green()),
+}
 
 # ---------------------------------------------------------------------------
-# Tracker (persist which listings have already been posted)
+# Tracker
 # ---------------------------------------------------------------------------
 
 def load_tracker() -> set:
     if os.path.exists(TRACKER_FILE):
         with open(TRACKER_FILE, "r") as f:
-            data = json.load(f)
-            return set(data.get("posted", []))
+            return set(json.load(f).get("posted", []))
     return set()
 
 
@@ -104,109 +64,86 @@ def save_tracker(posted_ids: set) -> None:
 
 
 def make_id(company: str, role: str, apply_url: str) -> str:
-    """Stable unique ID for a listing."""
     raw = f"{company.lower()}|{role.lower()}|{apply_url}"
     return hashlib.md5(raw.encode()).hexdigest()
 
 
 # ---------------------------------------------------------------------------
-# Markdown table parser
+# HTML table parser
 # ---------------------------------------------------------------------------
-
-# Strips markdown links like [text](url) → text
-_LINK_TEXT_RE  = re.compile(r"\[([^\]]*)\]\([^)]*\)")
-# Extracts the first URL from a markdown cell
-_LINK_URL_RE   = re.compile(r"\[(?:[^\]]*)\]\(([^)]+)\)")
-# HTML tags (SimplifyJobs uses <br> for multi-location)
-_HTML_TAG_RE   = re.compile(r"<[^>]+>")
-# Separator rows: | :---: | --- |  (just needs to start with | and contain only separator chars)
-_SEPARATOR_RE  = re.compile(r"^\|[\s\-:|]+")
-
-
-def _clean(text: str) -> str:
-    text = _HTML_TAG_RE.sub(" ", text)
-    text = _LINK_TEXT_RE.sub(r"\1", text)
-    return text.strip()
-
 
 def parse_readme(content: str) -> list[dict]:
     """
-    Parse a SimplifyJobs-style README markdown table and return a list of
-    internship dicts for CS/PM roles only.
+    Parse the SimplifyJobs HTML-table README and return internship listings
+    for Software Engineering, Product Management, and Data Science / AI sections.
     """
+    soup = BeautifulSoup(content, "html.parser")
     listings = []
-    header_passed = False
-    in_table = False
 
-    for raw_line in content.splitlines():
-        line = raw_line.strip()
+    for h2 in soup.find_all("h2"):
+        section_text = h2.get_text(strip=True)
 
-        if not line.startswith("|"):
-            if in_table:
-                # We just left a table block — reset state
-                in_table = False
-                header_passed = False
+        # Match to one of our target sections
+        matched_key = None
+        for key in TARGET_SECTIONS:
+            if key in section_text:
+                matched_key = key
+                break
+        if not matched_key:
             continue
 
-        in_table = True
+        emoji, category_label, _ = TARGET_SECTIONS[matched_key]
 
-        # Skip separator rows
-        if _SEPARATOR_RE.match(line):
-            header_passed = True
+        # Find the <table> that immediately follows this heading
+        table = h2.find_next("table")
+        if not table:
             continue
 
-        if not header_passed:
-            # This is the header row — skip it
-            continue
+        for row in table.find_all("tr"):
+            cells = row.find_all("td")
+            if len(cells) < 4:
+                continue
 
-        # Split into cells and strip surrounding whitespace
-        cells = [c.strip() for c in line.split("|")]
-        cells = [c for c in cells if c != ""]   # remove empties from leading/trailing |
+            # ── Company ──────────────────────────────────────────
+            company_el   = cells[0].find("a")
+            company_name = cells[0].get_text(strip=True).replace("🔥", "").strip()
+            company_url  = company_el["href"] if company_el else None
 
-        if len(cells) < 4:
-            continue
+            # ── Role ─────────────────────────────────────────────
+            role = cells[1].get_text(strip=True)
+            # Skip closed listings and continuation rows
+            if "🔒" in role or not role or role.startswith("↳"):
+                continue
+            role = role.replace("🔒", "").strip()
 
-        company_cell  = cells[0]
-        role_cell     = cells[1]
-        location_cell = cells[2]
-        apply_cell    = cells[3]
-        date_cell     = cells[4] if len(cells) > 4 else ""
+            # ── Location ─────────────────────────────────────────
+            location = cells[2].get_text(separator=", ", strip=True) or "Not specified"
 
-        # Role continuations are marked with ↳  — skip
-        if "↳" in role_cell and _clean(role_cell).strip() == "↳":
-            continue
+            # ── Apply URL ─────────────────────────────────────────
+            # Prefer the "Apply" image link (direct employer link)
+            apply_img = cells[3].find("img", alt="Apply")
+            if apply_img and apply_img.parent and apply_img.parent.get("href"):
+                apply_url = apply_img.parent["href"]
+            else:
+                first_a = cells[3].find("a")
+                if not first_a or not first_a.get("href"):
+                    continue
+                apply_url = first_a["href"]
 
-        role = _clean(role_cell)
-        if not role or not is_relevant(role):
-            continue
+            # ── Date / Age ────────────────────────────────────────
+            date_posted = cells[4].get_text(strip=True) if len(cells) > 4 else "—"
 
-        # Company name + optional URL
-        company_name = _clean(company_cell)
-        company_url_m = _LINK_URL_RE.search(company_cell)
-        company_url = company_url_m.group(1) if company_url_m else None
-
-        # Location — may contain <br> separators
-        location = location_cell.replace("<br>", ", ").replace("<br/>", ", ")
-        location = _clean(location) or "Not specified"
-
-        # Apply links — grab the first one
-        apply_urls = _LINK_URL_RE.findall(apply_cell)
-        if not apply_urls:
-            continue
-        apply_url = apply_urls[0]
-
-        # Date
-        date_posted = _clean(date_cell) or "—"
-
-        listings.append({
-            "id":           make_id(company_name, role, apply_url),
-            "company":      company_name,
-            "company_url":  company_url,
-            "role":         role,
-            "location":     location,
-            "apply_url":    apply_url,
-            "date_posted":  date_posted,
-        })
+            listings.append({
+                "id":            make_id(company_name, role, apply_url),
+                "company":       company_name,
+                "company_url":   company_url,
+                "role":          role,
+                "location":      location,
+                "apply_url":     apply_url,
+                "date_posted":   date_posted,
+                "category":      f"{emoji} {category_label}",
+                "color":         TARGET_SECTIONS[matched_key][2],
+            })
 
     return listings
 
@@ -216,21 +153,16 @@ def parse_readme(content: str) -> list[dict]:
 # ---------------------------------------------------------------------------
 
 def build_embed(listing: dict, source_label: str) -> discord.Embed:
-    emoji, category = role_category(listing["role"])
-
-    color = discord.Color.blurple() if category == "Software / CS" else discord.Color.purple()
-
-    title = f"{listing['company']}  —  {listing['role']}"
     embed = discord.Embed(
-        title=title[:256],          # Discord limit
+        title=f"{listing['company']}  —  {listing['role']}"[:256],
         url=listing["apply_url"],
-        color=color,
+        color=listing["color"],
         timestamp=datetime.now(timezone.utc),
     )
 
-    embed.add_field(name="📍 Location",    value=listing["location"][:1024],  inline=True)
-    embed.add_field(name=f"{emoji} Type", value=category,                     inline=True)
-    embed.add_field(name="📅 Posted",      value=listing["date_posted"],       inline=True)
+    embed.add_field(name="📍 Location",  value=listing["location"][:1024], inline=True)
+    embed.add_field(name="🗂 Category",  value=listing["category"],         inline=True)
+    embed.add_field(name="📅 Posted",    value=listing["date_posted"],      inline=True)
     embed.add_field(
         name="🔗 Apply",
         value=f"[Click here to apply]({listing['apply_url']})",
@@ -265,7 +197,7 @@ async def on_ready():
 async def check_and_post():
     channel = client.get_channel(CHANNEL_ID)
     if channel is None:
-        print(f"❌  Channel {CHANNEL_ID} not found. Check your CHANNEL_ID in .env")
+        print(f"❌  Channel {CHANNEL_ID} not found. Check your CHANNEL_ID in Railway variables.")
         return
 
     posted_ids = load_tracker()
@@ -280,7 +212,7 @@ async def check_and_post():
             print(f"⚠️   Could not fetch {source['label']}: {exc}")
             continue
 
-        listings = parse_readme(resp.text)
+        listings     = parse_readme(resp.text)
         new_listings = [l for l in listings if l["id"] not in posted_ids]
         print(f"    {len(listings)} relevant listings found, {len(new_listings)} new.")
 
@@ -290,7 +222,7 @@ async def check_and_post():
                 await channel.send(embed=embed)
                 posted_ids.add(listing["id"])
                 new_total += 1
-                await asyncio.sleep(1.2)   # stay well within Discord rate limits
+                await asyncio.sleep(1.2)   # stay within Discord rate limits
             except discord.HTTPException as exc:
                 print(f"⚠️   Discord error posting {listing['company']}: {exc}")
 
@@ -313,8 +245,8 @@ async def before_loop():
 
 if __name__ == "__main__":
     if not TOKEN:
-        raise SystemExit("❌  DISCORD_TOKEN is not set. Copy .env.example → .env and fill it in.")
+        raise SystemExit("❌  DISCORD_TOKEN is not set.")
     if CHANNEL_ID == 0:
-        raise SystemExit("❌  CHANNEL_ID is not set. Copy .env.example → .env and fill it in.")
+        raise SystemExit("❌  CHANNEL_ID is not set.")
 
     client.run(TOKEN)
